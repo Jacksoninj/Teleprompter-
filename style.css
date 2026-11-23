@@ -255,3 +255,9 @@ body.prompting { overflow: hidden; overscroll-behavior: none; position: fixed; i
 #logText { flex: 1; margin: 0; padding: 10px 12px; overflow: auto; font: 12px/1.45 ui-monospace, Menlo, monospace; color: #b8c0d0; white-space: pre-wrap; word-break: break-word; }
 
 #transcript .stalled { color: #ffcc33; font-weight: 700; }
+
+#logText { -webkit-user-select: text; user-select: text; }
+.log-tip { margin: 0; padding: 6px 12px 10px; font-size: 12px; color: #8a90a0; }
+.engine-box { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px; margin: -4px 0 8px; }
+.engine-box .muted { flex: 1 1 100%; line-height: 1.5; }
+.btn.small { padding: 6px 10px; font-size: 13px; }

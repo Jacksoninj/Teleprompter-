@@ -65,6 +65,18 @@
         </select>
       </label>
 
+      <label class="row">辨識引擎
+        <select id="engine" data-s="engine">
+          <option value="auto">自動（iPhone 英文講稿用離線）</option>
+          <option value="browser">瀏覽器內建（Apple／Google）</option>
+          <option value="offline">離線（喺網頁入面辨識，只限英文）</option>
+        </select>
+      </label>
+      <div class="engine-box">
+        <span id="engineStatus" class="muted"></span>
+        <button id="preload" class="btn ghost small" type="button">預先下載離線模型</button>
+      </div>
+
       <label class="row">字級 <output data-for="fontSize"></output>
         <input type="range" min="20" max="140" step="2" data-s="fontSize">
       </label>
@@ -152,9 +164,10 @@
   <div id="logPanel" hidden>
     <div class="log-head">
       <b>語音辨識紀錄</b>
-      <span><button id="logCopy" type="button">複製</button> <button id="logClose" type="button">關閉</button></span>
+      <span><button id="logCopy" type="button">分享／複製</button> <button id="logClose" type="button">關閉</button></span>
     </div>
     <pre id="logText"></pre>
+    <p class="log-tip">撳「分享／複製」再揀「拷貝」；或者長按上面文字揀「全選」再複製。</p>
   </div>
 </div>
 

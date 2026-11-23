@@ -54,6 +54,7 @@
     mirrorX: false,
     mirrorY: false,
     transcript: true,
+    engine: 'auto', // auto | browser | offline
   };
   const settings = Object.assign({}, DEFAULTS, LS.get('settings', {}));
   if (!SR && settings.mode === 'voice') settings.mode = 'auto';
@@ -360,6 +361,12 @@
       transcriptEl.innerHTML = '<b class="stalled">辨識停咗 — 撳一下畫面繼續聆聽</b>';
       return;
     }
+    if (listening && engineInUse === 'offline' && diag.results === 0 && !interim) {
+      transcriptEl.textContent = voskState !== 'ready'
+        ? (voskState === 'error' ? '離線模型載入失敗：' + voskErr : '下載／載入離線模型中…（第一次約 40MB）')
+        : `離線辨識｜咪高峰 ${diag.audio ? '✓' : '–'} 聲音 ${diag.sound ? '✓' : '–'} 說話 ${diag.speech ? '✓' : '–'}`;
+      return;
+    }
     if (listening && diag.results === 0) {
       // nothing recognised yet: show what the browser has reported so far
       const ok = (b) => (b ? '✓' : '–');
@@ -394,7 +401,162 @@
   let fails = 0, sessionActive = false, lastStartCall = 0, lastEventAt = 0, watchdog = 0, restartTimer = 0, warnedCapture = false;
   const FATAL = ['not-allowed', 'service-not-allowed', 'language-not-supported'];
 
+  // ================= offline engine (Vosk, runs in the page) =================
+  // Apple's web speech service stops after ~1 min and won't always restart without a tap.
+  // Vosk does the recognition inside the page from the raw microphone stream instead.
+  const VOSK_JS = 'https://cdn.jsdelivr.net/npm/vosk-browser@0.0.8/dist/vosk.js';
+  const VOSK_MODEL_EN = 'https://ccoreilly.github.io/vosk-browser/models/vosk-model-small-en-us-0.15.tar.gz';
+  let voskPromise = null, voskState = 'idle', voskErr = '';
+  let vosk = { ctx: null, stream: null, src: null, node: null, rec: null };
+  let engineInUse = '';
+  const NUMBER_WORDS = 'zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty thirty forty fifty sixty seventy eighty ninety hundred thousand million point percent'.split(' ');
+
+  function resolveEngine() {
+    const en = settings.lang.startsWith('en');
+    if (settings.engine === 'offline') return en ? 'offline' : 'browser';
+    if (settings.engine === 'browser') return SR ? 'browser' : (en ? 'offline' : 'browser');
+    return (IS_IOS || !SR) && en ? 'offline' : 'browser';
+  }
+
+  function setVosk(state, err) {
+    voskState = state; voskErr = err || '';
+    const el = $('#engineStatus');
+    if (el) {
+      el.textContent = {
+        idle: '離線模型：未下載（約 40MB，下載一次之後會留喺手機）',
+        downloading: '離線模型：下載／載入中…（第一次約 40MB，請等一陣）',
+        ready: '離線模型：已就緒 ✓',
+        error: '離線模型：載入失敗 — ' + voskErr,
+      }[state];
+    }
+    if (!prompter.hidden) { paintHud(true); paintTranscript(); }
+  }
+
+  function loadScript(src) {
+    return new Promise((res, rej) => {
+      const el = document.createElement('script');
+      el.src = src; el.onload = res; el.onerror = () => rej(new Error('無法載入 ' + src));
+      document.head.appendChild(el);
+    });
+  }
+
+  function loadVosk() {
+    if (voskPromise) return voskPromise;
+    setVosk('downloading');
+    voskPromise = (async () => {
+      if (!window.Vosk) await loadScript(VOSK_JS);
+      // the worker caches the unpacked model in IndexedDB, keyed by this URL
+      const model = await window.Vosk.createModel(VOSK_MODEL_EN);
+      setVosk('ready');
+      return model;
+    })().catch((err) => {
+      voskPromise = null;
+      setVosk('error', (err && err.message) || String(err));
+      throw err;
+    });
+    return voskPromise;
+  }
+
+  function grammarWords() {
+    const set = new Set(NUMBER_WORDS);
+    for (const t of tokens) if (/^[a-z]+(?:'[a-z]+)?$/.test(t.norm)) set.add(t.norm);
+    return [...set];
+  }
+
+  function startOffline() {
+    engineInUse = 'offline';
+    listening = true; stalled = false;
+    heard = ''; session = ''; interim = ''; skip = 0;
+    diag = { start: false, audio: false, sound: false, speech: false, results: 0, ends: 0, err: '', since: now() };
+    evlog.length = 0;
+    logEv(`listen engine=offline lang=${settings.lang}`);
+    // the AudioContext must be created/resumed inside the tap on iOS
+    const AC = window.AudioContext || window.webkitAudioContext;
+    vosk.ctx = new AC();
+    vosk.ctx.resume?.();
+    vosk.ctx.onstatechange = () => {
+      logEv('audio ' + vosk.ctx?.state);
+      if (listening && vosk.ctx && vosk.ctx.state !== 'running') { stalled = true; paintTranscript(); pokeHud(); }
+      else if (vosk.ctx?.state === 'running' && stalled) { stalled = false; paintTranscript(); }
+    };
+    const mic = navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+    Promise.all([loadVosk(), mic]).then(([model, stream]) => {
+      if (!listening || engineInUse !== 'offline') { stream.getTracks().forEach((t) => t.stop()); return; }
+      vosk.stream = stream;
+      const track = stream.getAudioTracks()[0];
+      logEv('mic: ' + (track ? track.label : '?'));
+      if (track) {
+        track.onmute = () => { logEv('mic muted'); stalled = true; paintTranscript(); pokeHud(); };
+        track.onunmute = () => { logEv('mic unmuted'); stalled = false; paintTranscript(); };
+        track.onended = () => { logEv('mic ended'); if (listening) { stalled = true; paintTranscript(); pokeHud(); } };
+      }
+      diag.start = true; diag.audio = true;
+      const rec = makeRecognizer(model, vosk.ctx.sampleRate);
+      vosk.rec = rec;
+      vosk.src = vosk.ctx.createMediaStreamSource(stream);
+      vosk.node = vosk.ctx.createScriptProcessor(4096, 1, 1);
+      vosk.node.onaudioprocess = (e) => {
+        try { rec.acceptWaveform(e.inputBuffer); } catch (err) { /* recogniser busy */ }
+        if (!diag.sound) {
+          const d = e.inputBuffer.getChannelData(0);
+          let m = 0; for (let i = 0; i < d.length; i += 8) m = Math.max(m, Math.abs(d[i]));
+          if (m > 0.02) { diag.sound = true; logEv('sound'); paintTranscript(); }
+        }
+      };
+      vosk.src.connect(vosk.node);
+      vosk.node.connect(vosk.ctx.destination);
+      logEv(`recognising @${vosk.ctx.sampleRate}Hz, ${grammarWords().length} words`);
+      paintTranscript(); paintHud(true);
+    }).catch((err) => {
+      const msg = (err && (err.name === 'NotAllowedError' ? '冇咪高峰權限' : err.message)) || String(err);
+      logEv('offline failed: ' + msg);
+      stopListening('offline failed');
+      toast('離線辨識開唔到：' + msg, 7000);
+    });
+    paintHud(true);
+  }
+
+  function makeRecognizer(model, rate) {
+    let rec;
+    try { rec = new model.KaldiRecognizer(rate, JSON.stringify([...grammarWords(), '[unk]'])); }
+    catch { rec = new model.KaldiRecognizer(rate); }
+    rec.on('partialresult', (m) => {
+      const p = ((m.result && m.result.partial) || '').replace(/\[unk\]/g, '').trim();
+      if (p === interim) return;
+      interim = p;
+      if (p && !diag.speech) { diag.speech = true; logEv('speech'); }
+      track(); paintTranscript();
+    });
+    rec.on('result', (m) => {
+      const t = ((m.result && m.result.text) || '').replace(/\[unk\]/g, '').trim();
+      if (!t) return;
+      diag.results++;
+      logEv('result: ' + t.slice(-50));
+      const toks = tokenize(t).slice(skip);
+      skip = 0; interim = '';
+      if (toks.length) heard = (heard + ' ' + toks.join(' ')).slice(-400);
+      track(); paintTranscript();
+    });
+    rec.on('error', (m) => logEv('recogniser error: ' + (m && m.error)));
+    return rec;
+  }
+
+  function stopOffline() {
+    try { vosk.node && (vosk.node.onaudioprocess = null); vosk.node?.disconnect(); vosk.src?.disconnect(); } catch { /* ignore */ }
+    vosk.stream?.getTracks().forEach((t) => t.stop());
+    try { vosk.rec?.remove(); } catch { /* ignore */ }
+    try { vosk.ctx?.close(); } catch { /* ignore */ }
+    vosk = { ctx: null, stream: null, src: null, node: null, rec: null };
+  }
+
   function startListening() {
+    if (listening) return;
+    if (resolveEngine() === 'offline') {
+      if (!navigator.mediaDevices?.getUserMedia || !window.isSecureContext) { toast('需要 HTTPS 先可以用咪高峰。'); return; }
+      startOffline();
+      return;
+    }
+    engineInUse = 'browser';
     if (!SR) { toast('這個瀏覽器不支援語音辨識，請改用 Chrome、Edge 或 Safari，或在設定選「固定速度」。'); return; }
     if (!window.isSecureContext) { toast('語音辨識需要 HTTPS（或 localhost）才能使用麥克風。'); return; }
     if (listening) return;
@@ -489,7 +651,7 @@
   }
 
   function checkAlive() {
-    if (!listening) return;
+    if (!listening || engineInUse === 'offline') return;
     const t = now();
     if (!sessionActive && t - lastStartCall > 3000) {
       // start() was called but the browser never started (or never told us it ended).
@@ -521,7 +683,8 @@
     clearInterval(watchdog);
     clearTimeout(restartTimer);
     logEv('stop' + (reason ? ` (${reason})` : ''));
-    try { recog?.stop(); } catch { /* ignore */ }
+    if (engineInUse === 'offline') stopOffline();
+    else { try { recog?.stop(); } catch { /* ignore */ } }
     paintHud(true);
   }
 
@@ -580,6 +743,7 @@
     hud.dot.className = 'dot' + (listening ? ' on' : playing ? ' play' : '');
     hud.status.textContent =
       mode === 'manual' ? '手動模式' :
+      listening && engineInUse === 'offline' ? (voskState === 'ready' ? `聆聽中・離線・${langLabel()}` : '載入離線模型…') :
       listening ? (fails >= 2 ? `重新連接中…・${langLabel()}` : `聆聽中・${langLabel()}`) :
       playing ? `捲動中 ${settings.speed}px/秒` :
       mode === 'voice' ? '已暫停（空白鍵開始聆聽）' : '已暫停（空白鍵開始捲動）';
@@ -644,7 +808,7 @@
       else settings[k] = el.value;
       saveSettings();
       applySettings();
-      if (k === 'mode') refreshSupport();
+      if (k === 'mode' || k === 'engine' || k === 'lang') refreshSupport();
     });
   }
 
@@ -933,6 +1097,7 @@
     clearInterval(watchdog);
     clearTimeout(restartTimer);
     try { recog?.abort(); } catch { /* ignore */ }
+    stopOffline();
   };
   window.addEventListener('pagehide', releaseMic);
   window.addEventListener('beforeunload', releaseMic);
@@ -1032,12 +1197,28 @@
   $('#hFull').addEventListener('click', toggleFullscreen);
   $('#hLog').addEventListener('click', () => { paintLog(); $('#logPanel').hidden = false; });
   $('#logClose').addEventListener('click', () => { $('#logPanel').hidden = true; });
-  $('#logCopy').addEventListener('click', async () => {
-    const text = `${navigator.userAgent}\nmode=${settings.mode} lang=${settings.lang}\n---\n` + evlog.join('\n');
-    try { await navigator.clipboard.writeText(text); }
-    catch { const ta2 = document.createElement('textarea'); ta2.value = text; document.body.appendChild(ta2); ta2.select(); document.execCommand('copy'); ta2.remove(); }
-    toast('已複製語音紀錄', 1200);
+  const logReport = () => `${navigator.userAgent}\nmode=${settings.mode} lang=${settings.lang} engine=${engineInUse || resolveEngine()}\n---\n` + evlog.join('\n');
+  $('#logCopy').addEventListener('click', () => {
+    const text = logReport();
+    // iOS: the share sheet is the most reliable way out ("Copy" is one of its actions)
+    if (navigator.share) { navigator.share({ text }).catch(() => {}); return; }
+    copyText(text);
   });
+  function copyText(text) {
+    const done = () => toast('已複製語音紀錄', 1200);
+    const fallback = () => {
+      const ta2 = document.createElement('textarea');
+      ta2.value = text; ta2.readOnly = true;
+      ta2.style.cssText = 'position:fixed;top:0;left:0;opacity:0;font-size:16px';
+      document.body.appendChild(ta2);
+      ta2.focus(); ta2.select(); ta2.setSelectionRange(0, text.length);
+      let ok = false; try { ok = document.execCommand('copy'); } catch { /* ignore */ }
+      ta2.remove();
+      ok ? done() : toast('複製唔到，請長按紀錄文字揀「全選」再複製', 4000);
+    };
+    if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(done, fallback);
+    else fallback();
+  }
   $('#hExit').addEventListener('click', exitPrompter);
 
   // ================= keyboard =================
@@ -1151,7 +1332,15 @@
     drag = null;
     stage.classList.remove('dragging');
     if (d.moved || d.long || e.type !== 'pointerup') return;
-    if (listening && (stalled || !sessionActive)) {
+    if (listening && engineInUse === 'offline' && stalled) {
+      // iOS suspends/interrupts the audio context; resuming it needs a tap
+      logEv('tap → resume audio');
+      vosk.ctx?.resume?.();
+      stalled = false; paintTranscript();
+      toast('繼續聆聽', 900);
+      return;
+    }
+    if (listening && engineInUse === 'browser' && (stalled || !sessionActive)) {
       // a tap is a user gesture, which iOS always accepts for starting recognition
       logEv('tap → start()');
       startSession();
@@ -1175,6 +1364,8 @@
 
   // ================= init =================
   $('#hFull').hidden = !CAN_FULLSCREEN;
+  setVosk(voskState);
+  $('#preload').addEventListener('click', () => { loadVosk().catch(() => {}); });
   $('#startMobile').addEventListener('click', () => enterPrompter(false));
   ta.value = LS.get('script', null) ?? SAMPLE;
   syncInputs();
@@ -1190,6 +1381,18 @@
       return pos;
     },
     get pos() { return pos; },
+    // feed an audio file through the offline engine (testing without a microphone)
+    async offlineFeed(url) {
+      const model = await loadVosk();
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const buf = await ctx.decodeAudioData(await (await fetch(url)).arrayBuffer());
+      const rec = makeRecognizer(model, buf.sampleRate);
+      const data = buf.getChannelData(0);
+      for (let i = 0; i < data.length; i += 4096) rec.acceptWaveformFloat(data.slice(i, i + 4096), buf.sampleRate);
+      rec.retrieveFinalResult();
+      await new Promise((r) => setTimeout(r, 3000));
+      return { pos, heard, log: evlog.slice(-10) };
+    },
     get tokens() { return tokens.length; },
   };
 })();
