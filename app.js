@@ -101,7 +101,6 @@
   // heard = text from finished recognition sessions; session = current session's final text;
   // interim = not-yet-final text; skip = tokens of the current session to ignore after a manual jump
   let heard = '', session = '', interim = '', skip = 0;
-  let endTimes = [];
   let sessionStart = 0, resultsAtStart = 0;
   let diag = { start: false, audio: false, sound: false, speech: false, results: 0, ends: 0, err: '', since: 0 };
   let lastGlobal = 0;
@@ -376,86 +375,126 @@
     transcriptEl.append(s);
   }
 
+  // ---- speech event log (shown via the 紀錄 button, copyable for debugging) ----
+  const evlog = [];
+  function logEv(msg) {
+    const t = ((now() - (diag.since || now())) / 1000).toFixed(1);
+    evlog.push(`${t.padStart(6)}s  ${msg}`);
+    if (evlog.length > 300) evlog.shift();
+    if (!$('#logPanel').hidden) paintLog();
+  }
+
+  // Keep recognition alive for as long as the user wants it: restart after every end, back off
+  // when sessions keep failing, and run a watchdog in case the browser silently stops.
+  let fails = 0, sessionActive = false, lastStartCall = 0, lastEventAt = 0, watchdog = 0, restartTimer = 0, warnedCapture = false;
+  const FATAL = ['not-allowed', 'service-not-allowed', 'language-not-supported'];
+
   function startListening() {
     if (!SR) { toast('這個瀏覽器不支援語音辨識，請改用 Chrome、Edge 或 Safari，或在設定選「固定速度」。'); return; }
     if (!window.isSecureContext) { toast('語音辨識需要 HTTPS（或 localhost）才能使用麥克風。'); return; }
     if (listening) return;
     if (!recog) {
       recog = new SR();
-      // iOS Safari's continuous mode can sit "listening" without ever returning results;
-      // one utterance per session plus automatic restart is far more reliable there.
+      // iOS Safari: one utterance per session plus automatic restart
       recog.continuous = !IS_IOS;
       recog.interimResults = true;
       recog.maxAlternatives = 1;
-      recog.onresult = (e) => { diag.results++; onResult(e); };
-      const mark = (k) => () => { diag[k] = true; paintTranscript(); };
-      recog.onstart = mark('start');
-      recog.onaudiostart = mark('audio');
-      recog.onsoundstart = mark('sound');
-      recog.onspeechstart = mark('speech');
+      const seen = (k, label) => () => { diag[k] = true; lastEventAt = now(); logEv(label); paintTranscript(); };
+      recog.onstart = () => { sessionActive = true; sessionStart = now(); resultsAtStart = diag.results; seen('start', 'start')(); };
+      recog.onaudiostart = seen('audio', 'audiostart');
+      recog.onsoundstart = seen('sound', 'soundstart');
+      recog.onspeechstart = seen('speech', 'speechstart');
+      recog.onresult = (e) => {
+        diag.results++;
+        fails = 0;
+        lastEventAt = now();
+        const last = e.results[e.results.length - 1];
+        logEv(`result${last.isFinal ? ' (final)' : ''}: ${last[0].transcript.slice(-40)}`);
+        onResult(e);
+      };
       recog.onerror = (e) => {
         diag.err = e.error;
+        lastEventAt = now();
+        logEv(`error: ${e.error}${e.message ? ' — ' + e.message : ''}`);
         paintTranscript();
-        if (e.error === 'no-speech' || e.error === 'aborted') return;
-        if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-          stopListening();
-          toast(IS_IOS
-            ? '無法使用語音辨識：請到「設定 → 一般 → 鍵盤」開啟「啟用聽寫」，並在「設定 → Safari → 麥克風」允許，再試一次。'
-            : '無法使用麥克風：請在網址列允許麥克風權限後再試一次。', 7000);
-        } else if (e.error === 'audio-capture') {
-          // iOS reports "Source is muted": the mic is delivering silence (another app or a call has it)
-          diag.capture = (diag.capture || 0) + 1;
-          if (diag.capture >= 2) {
-            stopListening();
-            toast('咪高峰冇聲音傳入（被靜音或者俾其他 App／通話佔用緊）。請關閉用緊咪高峰嘅 App、停止螢幕錄影，或重新開機後再試。', 9000);
-          }
+        if (FATAL.includes(e.error)) {
+          stopListening('error ' + e.error);
+          toast(e.error === 'language-not-supported' ? '這個瀏覽器不支援所選的辨識語言。'
+            : IS_IOS ? '無法使用語音辨識：請到「設定 → 一般 → 鍵盤」開啟「啟用聽寫」，並在「設定 → App → Safari → 咪高峰」允許，再試一次。'
+            : '無法使用麥克風：請在網址列允許麥克風權限後再試一次。', 8000);
+        } else if (e.error === 'audio-capture' && !warnedCapture) {
+          warnedCapture = true;
+          toast('咪高峰暫時冇聲音傳入（可能被其他 App 佔用）。會自動重試；如果一直唔得，請閂咗其他 App 或重新開機。', 7000);
         } else if (e.error === 'network') {
           toast('語音辨識連線失敗（需要網路）。會自動重試。');
-        } else if (e.error === 'language-not-supported') {
-          stopListening();
-          toast('這個瀏覽器不支援所選的辨識語言。');
-        } else {
-          toast('語音辨識錯誤：' + e.error);
         }
       };
       recog.onend = () => {
+        sessionActive = false;
+        lastEventAt = now();
         foldSession();
-        // Browsers end continuous recognition after silence or ~1 min. Restart while active,
-        // but give up if it keeps dying immediately (e.g. iOS refusing restarts without a tap).
         diag.ends++;
+        // a session that produced nothing within a few seconds counts as a failure → back off
+        const failed = diag.results === resultsAtStart && now() - sessionStart < 4000;
+        fails = failed ? fails + 1 : 0;
+        logEv(`end${failed ? ` (failed ×${fails})` : ''}`);
         paintTranscript();
-        if (listening) {
-          const t = now();
-          // only sessions that die almost immediately with nothing recognised count as failures
-          if (t - sessionStart < 1500 && diag.results === resultsAtStart) endTimes.push(t);
-          endTimes = endTimes.filter((x) => t - x < 15000);
-          if (endTimes.length > 5) {
-            listening = false;
-            toast('語音辨識一直中斷，請點 ▶ 重新開始。', 5000);
-          } else {
-            setTimeout(() => { if (listening) startSession(); }, 150);
-          }
-        }
+        if (listening) scheduleRestart();
         paintHud(true);
       };
     }
     recog.lang = settings.lang;
     listening = true;
-    endTimes = [];
+    fails = 0; warnedCapture = false;
     diag = { start: false, audio: false, sound: false, speech: false, results: 0, ends: 0, err: '', since: now() };
+    evlog.length = 0;
+    logEv(`listen lang=${recog.lang} continuous=${recog.continuous}`);
     startSession();
+    clearInterval(watchdog);
+    watchdog = setInterval(checkAlive, 1000);
     paintHud(true);
-  }
-  function startSession() {
-    sessionStart = now();
-    resultsAtStart = diag.results;
-    try { recog.start(); } catch { /* already running */ }
   }
 
-  function stopListening() {
+  function scheduleRestart() {
+    clearTimeout(restartTimer);
+    const delay = fails ? Math.min(5000, 250 * 2 ** fails) : 150;
+    restartTimer = setTimeout(() => { if (listening && !sessionActive) startSession(); }, delay);
+  }
+
+  function startSession() {
+    lastStartCall = now();
+    sessionStart = now();
+    resultsAtStart = diag.results;
+    try { recog.start(); logEv('start()'); }
+    catch (err) { logEv('start() threw: ' + (err && err.name)); }
+  }
+
+  function checkAlive() {
+    if (!listening) return;
+    const t = now();
+    if (!sessionActive && t - lastStartCall > 3000) {
+      // start() was called but the browser never started (or never told us it ended)
+      logEv('watchdog: not running → retry');
+      try { recog.abort(); } catch { /* ignore */ }
+      startSession();
+    } else if (sessionActive && t - lastEventAt > 20000) {
+      logEv('watchdog: no events for 20s → abort');
+      try { recog.abort(); } catch { /* ignore */ }
+    }
+  }
+
+  function stopListening(reason) {
     listening = false;
+    clearInterval(watchdog);
+    clearTimeout(restartTimer);
+    logEv('stop' + (reason ? ` (${reason})` : ''));
     try { recog?.stop(); } catch { /* ignore */ }
     paintHud(true);
+  }
+
+  function paintLog() {
+    $('#logText').textContent = evlog.join('\n') || '（未有紀錄）';
+    $('#logText').scrollTop = 1e9;
   }
 
   // ================= transport =================
@@ -508,7 +547,7 @@
     hud.dot.className = 'dot' + (listening ? ' on' : playing ? ' play' : '');
     hud.status.textContent =
       mode === 'manual' ? '手動模式' :
-      listening ? `聆聽中・${langLabel()}` :
+      listening ? (fails >= 2 ? `重新連接中…・${langLabel()}` : `聆聽中・${langLabel()}`) :
       playing ? `捲動中 ${settings.speed}px/秒` :
       mode === 'voice' ? '已暫停（空白鍵開始聆聽）' : '已暫停（空白鍵開始捲動）';
     hud.toggle.textContent = isRunning() ? '❚❚' : '▶';
@@ -946,6 +985,14 @@
   $('#hBigger').addEventListener('click', () => bumpFont(4));
   $('#hMirror').addEventListener('click', () => { settings.mirrorX = !settings.mirrorX; saveSettings(); syncInputs(); applySettings(); });
   $('#hFull').addEventListener('click', toggleFullscreen);
+  $('#hLog').addEventListener('click', () => { paintLog(); $('#logPanel').hidden = false; });
+  $('#logClose').addEventListener('click', () => { $('#logPanel').hidden = true; });
+  $('#logCopy').addEventListener('click', async () => {
+    const text = `${navigator.userAgent}\nmode=${settings.mode} lang=${settings.lang}\n---\n` + evlog.join('\n');
+    try { await navigator.clipboard.writeText(text); }
+    catch { const ta2 = document.createElement('textarea'); ta2.value = text; document.body.appendChild(ta2); ta2.select(); document.execCommand('copy'); ta2.remove(); }
+    toast('已複製語音紀錄', 1200);
+  });
   $('#hExit').addEventListener('click', exitPrompter);
 
   // ================= keyboard =================

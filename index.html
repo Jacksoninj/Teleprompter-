@@ -142,11 +142,20 @@
       <button id="hBigger" type="button" title="放大字（+）">A+</button>
       <button id="hMirror" type="button" title="左右鏡像（M）">⇋</button>
       <button id="hFull" type="button" title="全螢幕（F）">⛶</button>
+      <button id="hLog" type="button" title="語音紀錄">紀錄</button>
       <button id="hExit" type="button" title="回到編輯（Esc）">✕</button>
     </div>
   </div>
 
   <div id="transcript"></div>
+
+  <div id="logPanel" hidden>
+    <div class="log-head">
+      <b>語音辨識紀錄</b>
+      <span><button id="logCopy" type="button">複製</button> <button id="logClose" type="button">關閉</button></span>
+    </div>
+    <pre id="logText"></pre>
+  </div>
 </div>
 
 <div id="toast" role="status" aria-live="polite"></div>
