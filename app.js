@@ -356,6 +356,10 @@
 
   const langLabel = () => document.querySelector(`#lang option[value="${settings.lang}"]`)?.textContent || settings.lang;
   function paintTranscript() {
+    if (listening && stalled) {
+      transcriptEl.innerHTML = '<b class="stalled">辨識停咗 — 撳一下畫面繼續聆聽</b>';
+      return;
+    }
     if (listening && diag.results === 0) {
       // nothing recognised yet: show what the browser has reported so far
       const ok = (b) => (b ? '✓' : '–');
@@ -386,7 +390,7 @@
 
   // Keep recognition alive for as long as the user wants it: restart after every end, back off
   // when sessions keep failing, and run a watchdog in case the browser silently stops.
-  let sessionSpeech = false;
+  let sessionSpeech = false, stalled = false;
   let fails = 0, sessionActive = false, lastStartCall = 0, lastEventAt = 0, watchdog = 0, restartTimer = 0, warnedCapture = false;
   const FATAL = ['not-allowed', 'service-not-allowed', 'language-not-supported'];
 
@@ -403,7 +407,7 @@
       recog.interimResults = true;
       recog.maxAlternatives = 1;
       const seen = (k, label) => () => { diag[k] = true; lastEventAt = now(); logEv(label); paintTranscript(); };
-      recog.onstart = () => { sessionActive = true; sessionSpeech = false; sessionStart = now(); resultsAtStart = diag.results; seen('start', 'start')(); };
+      recog.onstart = () => { if (stalled) { stalled = false; logEv('resumed'); } sessionActive = true; sessionSpeech = false; sessionStart = now(); resultsAtStart = diag.results; seen('start', 'start')(); };
       recog.onaudiostart = seen('audio', 'audiostart');
       recog.onsoundstart = seen('sound', 'soundstart');
       recog.onspeechstart = () => { sessionSpeech = true; seen('speech', 'speechstart')(); };
@@ -488,7 +492,9 @@
     if (!listening) return;
     const t = now();
     if (!sessionActive && t - lastStartCall > 3000) {
-      // start() was called but the browser never started (or never told us it ended)
+      // start() was called but the browser never started (or never told us it ended).
+      // iOS sometimes only honours start() inside a tap, so also ask the user to tap.
+      if (!stalled) { stalled = true; logEv('stalled: waiting for tap'); paintTranscript(); pokeHud(); }
       logEv('watchdog: not running → retry');
       try { recog.abort(); } catch { /* ignore */ }
       startSession();
@@ -511,6 +517,7 @@
 
   function stopListening(reason) {
     listening = false;
+    stalled = false;
     clearInterval(watchdog);
     clearTimeout(restartTimer);
     logEv('stop' + (reason ? ` (${reason})` : ''));
@@ -1144,6 +1151,13 @@
     drag = null;
     stage.classList.remove('dragging');
     if (d.moved || d.long || e.type !== 'pointerup') return;
+    if (listening && (stalled || !sessionActive)) {
+      // a tap is a user gesture, which iOS always accepts for starting recognition
+      logEv('tap → start()');
+      startSession();
+      toast('繼續聆聽', 900);
+      return;
+    }
     if (d.touch) { toggleHud(); return; }
     const w = wordAt(e.clientX, e.clientY);
     if (w) { jumpTo(+w.dataset.i); toast('已把進度設在這裡', 900); }

@@ -253,3 +253,5 @@ body.prompting { overflow: hidden; overscroll-behavior: none; position: fixed; i
 .log-head { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; border-bottom: 1px solid #262a33; }
 .log-head button { font: inherit; font-size: 15px; color: #e8eaf0; background: #222630; border: 1px solid #3a4050; border-radius: 8px; padding: 8px 14px; }
 #logText { flex: 1; margin: 0; padding: 10px 12px; overflow: auto; font: 12px/1.45 ui-monospace, Menlo, monospace; color: #b8c0d0; white-space: pre-wrap; word-break: break-word; }
+
+#transcript .stalled { color: #ffcc33; font-weight: 700; }
