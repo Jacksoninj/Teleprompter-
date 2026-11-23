@@ -184,6 +184,10 @@
     }
   };
 
+  // release the mic immediately when leaving/reloading (iOS can otherwise keep it captured)
+  const release = () => { active = false; try { rec && rec.abort(); } catch {} if (micStream) micStream.getTracks().forEach((t) => t.stop()); };
+  window.addEventListener('pagehide', release);
+  window.addEventListener('beforeunload', release);
   log('page loaded');
 })();
 </script>

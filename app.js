@@ -427,7 +427,7 @@
             : '無法使用麥克風：請在網址列允許麥克風權限後再試一次。', 8000);
         } else if (e.error === 'audio-capture' && !warnedCapture) {
           warnedCapture = true;
-          toast('咪高峰暫時冇聲音傳入（可能被其他 App 佔用）。會自動重試；如果一直唔得，請閂咗其他 App 或重新開機。', 7000);
+          toast('咪高峰冇聲音傳入。通常係 Safari 嘅咪高峰卡住咗：請由螢幕底部向上掃，強制關閉 Safari 再打開。會繼續自動重試。', 9000);
         } else if (e.error === 'network') {
           toast('語音辨識連線失敗（需要網路）。會自動重試。');
         }
@@ -901,6 +901,18 @@
   async function requestWake() {
     try { if ('wakeLock' in navigator && !wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; }); } } catch { /* not allowed */ }
   }
+  // iOS Safari can keep the old page's microphone capture alive across a reload, and the new
+  // page then only gets a muted source. Abort recognition the moment this page is unloaded.
+  const releaseMic = () => {
+    listening = false;
+    clearInterval(watchdog);
+    clearTimeout(restartTimer);
+    try { recog?.abort(); } catch { /* ignore */ }
+  };
+  window.addEventListener('pagehide', releaseMic);
+  window.addEventListener('beforeunload', releaseMic);
+  window.addEventListener('pageshow', (e) => { if (e.persisted && !prompter.hidden) paintHud(true); });
+
   let pausedByHide = false;
   document.addEventListener('visibilitychange', () => {
     if (prompter.hidden) return;
