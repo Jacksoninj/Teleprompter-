@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>語音提詞器</title>
+<meta name="description" content="會聽你說話、自動跟上進度的簡報提詞器。">
+<meta name="theme-color" content="#0b0c0f">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="提詞器">
+<meta name="format-detection" content="telephone=no">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23111'/%3E%3Cpath d='M14 22h36M14 32h28M14 42h20' stroke='%23ffcc33' stroke-width='6' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<main id="editor">
+  <header class="top">
+    <h1>語音提詞器</h1>
+    <p class="sub">貼上或匯入講稿，開始後畫面會依照你說話的進度自動捲動。</p>
+  </header>
+
+  <section class="grid">
+    <div class="card script-card">
+      <div class="toolbar">
+        <label class="btn" for="file">匯入檔案</label>
+        <input type="file" id="file" accept=".txt,.md,.markdown,.docx,.pptx,text/plain" hidden>
+        <button id="sample" class="btn ghost" type="button">載入範例</button>
+        <button id="clear" class="btn ghost" type="button">清空</button>
+        <span id="stats" class="muted"></span>
+      </div>
+      <textarea id="script" spellcheck="false" placeholder="在這裡貼上講稿，或把 .txt / .md / .docx / .pptx 檔案拖進來。"></textarea>
+      <p class="hint">
+        支援 <b>.txt</b>、<b>.md</b>、<b>.docx</b>，以及 <b>.pptx</b>（讀取每張投影片的演講者備忘稿）。<br>
+        以 <code>#</code> 開頭的行是段落標題；<code>[方括號]</code> 裡是提示，例如 <code>[停頓]</code>、<code>[換投影片]</code>。這兩種都不需要唸出來，也不會影響追蹤。
+      </p>
+    </div>
+
+    <aside class="card settings">
+      <h2>設定</h2>
+
+      <fieldset class="seg">
+        <legend>捲動方式</legend>
+        <label><input type="radio" name="mode" value="voice" data-s="mode"> 語音追蹤</label>
+        <label><input type="radio" name="mode" value="auto" data-s="mode"> 固定速度</label>
+        <label><input type="radio" name="mode" value="manual" data-s="mode"> 手動</label>
+      </fieldset>
+
+      <label class="row">辨識語言
+        <select id="lang" data-s="lang">
+          <option value="zh-TW">中文（台灣）</option>
+          <option value="zh-HK">粵語（香港）</option>
+          <option value="zh-CN">普通话（中国大陆）</option>
+          <option value="en-US">English (US)</option>
+          <option value="en-GB">English (UK)</option>
+          <option value="ja-JP">日本語</option>
+          <option value="ko-KR">한국어</option>
+          <option value="fr-FR">Français</option>
+          <option value="de-DE">Deutsch</option>
+          <option value="es-ES">Español</option>
+        </select>
+      </label>
+
+      <label class="row">字級 <output data-for="fontSize"></output>
+        <input type="range" min="20" max="140" step="2" data-s="fontSize">
+      </label>
+      <label class="row">行距 <output data-for="lineHeight"></output>
+        <input type="range" min="1.1" max="2.4" step="0.05" data-s="lineHeight">
+      </label>
+      <label class="row">文字寬度 <output data-for="width"></output>
+        <input type="range" min="40" max="100" step="1" data-s="width">
+      </label>
+      <label class="row">閱讀線位置 <output data-for="readingLine"></output>
+        <input type="range" min="10" max="70" step="1" data-s="readingLine">
+      </label>
+      <label class="row">固定速度 <output data-for="speed"></output>
+        <input type="range" min="5" max="250" step="5" data-s="speed">
+      </label>
+
+      <div class="checks">
+        <label><input type="checkbox" data-s="mirrorX"> 左右鏡像（提詞玻璃用）</label>
+        <label><input type="checkbox" data-s="mirrorY"> 上下翻轉</label>
+        <label><input type="checkbox" data-s="transcript"> 顯示辨識到的文字</label>
+      </div>
+
+      <div id="support" class="notice" hidden></div>
+
+      <button id="start" class="btn primary big" type="button">開始提詞 ▶</button>
+      <button id="resume" class="btn ghost wide" type="button" hidden>從上次位置繼續</button>
+
+      <details class="keys">
+        <summary>快捷鍵</summary>
+        <dl>
+          <dt>空白鍵</dt><dd>開始／暫停</dd>
+          <dt>← →</dt><dd>上一句／下一句（固定速度模式：調整段落）</dd>
+          <dt>↑ ↓</dt><dd>上一段／下一段（固定速度模式：調整速度）</dd>
+          <dt>PageUp / PageDown</dt><dd>上一段／下一段（簡報筆可用）</dd>
+          <dt>+ −</dt><dd>放大／縮小字</dd>
+          <dt>M</dt><dd>左右鏡像</dd>
+          <dt>F</dt><dd>全螢幕</dd>
+          <dt>Home</dt><dd>回到開頭</dd>
+          <dt>Esc</dt><dd>回到編輯</dd>
+          <dt>點一下文字</dt><dd>把進度設在那裡</dd>
+          <dt>滾輪／拖曳</dt><dd>手動調整，停手後會從閱讀線重新對位</dd>
+        </dl>
+      </details>
+    </aside>
+  </section>
+
+  <div class="mobile-bar"><button id="startMobile" class="btn primary" type="button">開始提詞 ▶</button></div>
+
+  <footer class="foot muted">
+    講稿只存在你的瀏覽器（localStorage），不會上傳。語音辨識由瀏覽器提供：Chrome 會把音訊送到 Google 處理，Safari 則交給 Apple。
+  </footer>
+</main>
+
+<div id="prompter" hidden>
+  <div id="stage">
+    <div id="content"></div>
+    <div id="marker"></div>
+  </div>
+
+  <div id="hud">
+    <div class="hud-left">
+      <span id="dot" class="dot"></span>
+      <span id="status">已暫停</span>
+      <span id="timer" class="mono">00:00</span>
+      <span id="progress" class="mono">0%</span>
+      <span id="section" class="section"></span>
+    </div>
+    <div class="hud-right">
+      <button id="hToggle" class="main" type="button" title="開始／暫停（空白鍵）">▶</button>
+      <button id="hSlower" class="auto-only" type="button" title="慢一點（↑）">慢</button>
+      <button id="hFaster" class="auto-only" type="button" title="快一點（↓）">快</button>
+      <button id="hHome" type="button" title="回到開頭（Home）">⟲</button>
+      <button id="hSmaller" type="button" title="縮小字（−）">A−</button>
+      <button id="hBigger" type="button" title="放大字（+）">A+</button>
+      <button id="hMirror" type="button" title="左右鏡像（M）">⇋</button>
+      <button id="hFull" type="button" title="全螢幕（F）">⛶</button>
+      <button id="hExit" type="button" title="回到編輯（Esc）">✕</button>
+    </div>
+  </div>
+
+  <div id="transcript"></div>
+</div>
+
+<div id="toast" role="status" aria-live="polite"></div>
+<div id="drop">放開以匯入講稿</div>
+
+<script src="app.js"></script>
+</body>
+</html>
