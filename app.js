@@ -414,6 +414,13 @@
         const last = e.results[e.results.length - 1];
         logEv(`result${last.isFinal ? ' (final)' : ''}: ${last[0].transcript.slice(-40)}`);
         onResult(e);
+        // Apple's recogniser handles roughly a minute of audio per session, then quietly stops
+        // returning text. Start a fresh session at a sentence boundary before that happens.
+        const age = now() - sessionStart;
+        if (recog.continuous && ((last.isFinal && age > 40000) || age > 55000)) {
+          logEv(`recycle after ${Math.round(age / 1000)}s`);
+          recycle();
+        }
       };
       recog.onerror = (e) => {
         diag.err = e.error;
@@ -485,10 +492,21 @@
       logEv('watchdog: not running → retry');
       try { recog.abort(); } catch { /* ignore */ }
       startSession();
-    } else if (sessionActive && t - lastEventAt > 20000) {
-      logEv('watchdog: no events for 20s → abort');
-      try { recog.abort(); } catch { /* ignore */ }
+    } else if (sessionActive && t - lastEventAt > 8000) {
+      // the session looks open but nothing has arrived for a while: recycle it. Don't wait for
+      // an "end" event — iOS sometimes never sends one after abort(), which left us stuck.
+      logEv('watchdog: no events for 8s → recycle');
+      recycle();
     }
+  }
+
+  // End the current session and start a fresh one shortly after, whether or not "end" fires.
+  function recycle() {
+    try { recog.abort(); } catch { /* ignore */ }
+    sessionActive = false;
+    lastEventAt = now();
+    foldSession();
+    scheduleRestart();
   }
 
   function stopListening(reason) {
