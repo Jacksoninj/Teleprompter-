@@ -402,6 +402,13 @@
           toast(IS_IOS
             ? '無法使用語音辨識：請到「設定 → 一般 → 鍵盤」開啟「啟用聽寫」，並在「設定 → Safari → 麥克風」允許，再試一次。'
             : '無法使用麥克風：請在網址列允許麥克風權限後再試一次。', 7000);
+        } else if (e.error === 'audio-capture') {
+          // iOS reports "Source is muted": the mic is delivering silence (another app or a call has it)
+          diag.capture = (diag.capture || 0) + 1;
+          if (diag.capture >= 2) {
+            stopListening();
+            toast('咪高峰冇聲音傳入（被靜音或者俾其他 App／通話佔用緊）。請關閉用緊咪高峰嘅 App、停止螢幕錄影，或重新開機後再試。', 9000);
+          }
         } else if (e.error === 'network') {
           toast('語音辨識連線失敗（需要網路）。會自動重試。');
         } else if (e.error === 'language-not-supported') {
