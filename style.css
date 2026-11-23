@@ -92,6 +92,7 @@ code { background: #222630; padding: 1px 5px; border-radius: 4px; font-size: .95
 
 .notice { margin-top: 12px; padding: 10px 12px; font-size: 13px; line-height: 1.6; border-radius: 9px; background: #2b2412; border: 1px solid #5a4a1a; color: #f3dca0; }
 
+.testlink { display: block; margin-top: 12px; font-size: 13px; color: var(--accent2); text-decoration: none; }
 .keys { margin-top: 16px; font-size: 13px; color: var(--muted); }
 .keys summary { cursor: pointer; }
 .keys dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 10px 0 0; }

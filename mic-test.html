@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>語音辨識測試</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: max(16px, env(safe-area-inset-top)) 16px 40px; background: #0b0c0f; color: #e8eaf0;
+         font: 15px/1.5 system-ui, -apple-system, "PingFang TC", sans-serif; -webkit-text-size-adjust: 100%; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  p { color: #8a90a0; margin: 0 0 14px; }
+  .card { background: #15171c; border: 1px solid #262a33; border-radius: 12px; padding: 12px; margin-bottom: 12px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0; }
+  select, button { font: inherit; font-size: 16px; color: #e8eaf0; background: #222630; border: 1px solid #3a4050; border-radius: 9px; padding: 10px 14px; }
+  button.go { background: #ffcc33; border-color: #ffcc33; color: #111; font-weight: 700; }
+  button:disabled { opacity: .4; }
+  label { display: inline-flex; gap: 6px; align-items: center; }
+  input[type=checkbox] { width: 20px; height: 20px; accent-color: #ffcc33; }
+  #env { font: 12px/1.5 ui-monospace, Menlo, monospace; color: #9aa3b5; white-space: pre-wrap; word-break: break-all; }
+  #heard { font-size: 20px; min-height: 2em; color: #fff; }
+  #heard i { color: #6c7488; font-style: normal; }
+  #log { font: 12px/1.45 ui-monospace, Menlo, monospace; white-space: pre-wrap; word-break: break-word; max-height: 50vh; overflow: auto; }
+  .err { color: #ff7b7b; } .res { color: #7fd1b9; } .ok { color: #ffcc33; }
+  #meter { height: 12px; background: #222630; border-radius: 6px; overflow: hidden; flex: 1; min-width: 120px; }
+  #meter div { height: 100%; width: 0; background: #4dd17a; transition: width .08s; }
+  a { color: #6aa0ff; }
+</style>
+</head>
+<body>
+  <h1>語音辨識測試</h1>
+  <p>在這頁按「開始」後說幾句話。完成後按「複製紀錄」貼給我，或截圖整頁。<a href="./">← 回提詞器</a></p>
+
+  <div class="card">
+    <div class="row">
+      <select id="lang">
+        <option value="en-US">English (US)</option>
+        <option value="en-GB">English (UK)</option>
+        <option value="zh-HK">粵語（香港）</option>
+        <option value="zh-TW">中文（台灣）</option>
+        <option value="zh-CN">普通话</option>
+      </select>
+      <label><input type="checkbox" id="cont"> continuous</label>
+      <label><input type="checkbox" id="interim" checked> interim</label>
+      <label><input type="checkbox" id="restart" checked> 自動重啟</label>
+    </div>
+    <div class="row">
+      <button id="start" class="go">開始</button>
+      <button id="stop" disabled>停止</button>
+      <button id="copy">複製紀錄</button>
+    </div>
+    <div id="heard"></div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <button id="micBtn">只測麥克風音量</button>
+      <div id="meter"><div></div></div>
+    </div>
+    <p style="margin:6px 0 0;font-size:13px">說話時綠色條應該會動。完全不動代表麥克風被別的 App（錄音、通話、螢幕錄影）佔用或沒有權限。</p>
+  </div>
+
+  <div class="card"><div id="env"></div></div>
+  <div class="card"><div id="log"></div></div>
+
+<script>
+(() => {
+  const $ = (s) => document.querySelector(s);
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const t0 = performance.now();
+  const lines = [];
+  function log(msg, cls) {
+    const ts = ((performance.now() - t0) / 1000).toFixed(2).padStart(7);
+    lines.push(`${ts}s  ${msg}`);
+    const d = document.createElement('div');
+    d.textContent = `${ts}s  ${msg}`;
+    if (cls) d.className = cls;
+    $('#log').appendChild(d);
+    $('#log').scrollTop = 1e9;
+  }
+
+  const env = {
+    ua: navigator.userAgent,
+    secure: window.isSecureContext,
+    SpeechRecognition: !!window.SpeechRecognition,
+    webkitSpeechRecognition: !!window.webkitSpeechRecognition,
+    navigatorLanguage: navigator.language,
+    languages: (navigator.languages || []).join(','),
+    standalone: window.navigator.standalone === true || matchMedia('(display-mode: standalone)').matches,
+    getUserMedia: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
+  };
+  $('#env').textContent = Object.entries(env).map(([k, v]) => `${k}: ${v}`).join('\n');
+
+  let rec = null, active = false, sessions = 0;
+  const stopBtn = $('#stop'), startBtn = $('#start');
+
+  function make() {
+    const r = new SR();
+    r.lang = $('#lang').value;
+    r.continuous = $('#cont').checked;
+    r.interimResults = $('#interim').checked;
+    r.maxAlternatives = 1;
+    for (const ev of ['start', 'audiostart', 'soundstart', 'speechstart', 'speechend', 'soundend', 'audioend', 'nomatch']) {
+      r.addEventListener(ev, () => log(ev, ev === 'nomatch' ? 'err' : 'ok'));
+    }
+    r.onresult = (e) => {
+      let fin = '', tmp = '';
+      for (let i = 0; i < e.results.length; i++) {
+        const t = e.results[i][0].transcript;
+        if (e.results[i].isFinal) fin += t + ' '; else tmp += t;
+      }
+      const last = e.results[e.results.length - 1];
+      log(`result idx=${e.resultIndex} n=${e.results.length} final=${last.isFinal} "${last[0].transcript}"`, 'res');
+      $('#heard').innerHTML = '';
+      $('#heard').append(fin);
+      const i = document.createElement('i'); i.textContent = tmp; $('#heard').append(i);
+    };
+    r.onerror = (e) => log(`error: ${e.error}${e.message ? ' — ' + e.message : ''}`, 'err');
+    r.onend = () => {
+      log('end');
+      if (active && $('#restart').checked) {
+        setTimeout(() => {
+          if (!active) return;
+          try { sessions++; log(`restart #${sessions} (no tap)`); r.start(); }
+          catch (err) { log('restart threw: ' + err.message, 'err'); }
+        }, 150);
+      } else { active = false; startBtn.disabled = false; stopBtn.disabled = true; }
+    };
+    return r;
+  }
+
+  startBtn.onclick = () => {
+    if (!SR) { log('這個瀏覽器沒有 SpeechRecognition', 'err'); return; }
+    rec = make();
+    active = true; sessions = 0;
+    log(`start() lang=${rec.lang} continuous=${rec.continuous} interim=${rec.interimResults}`);
+    try { rec.start(); } catch (err) { log('start threw: ' + err.message, 'err'); }
+    startBtn.disabled = true; stopBtn.disabled = false;
+  };
+  stopBtn.onclick = () => {
+    active = false;
+    log('stop()');
+    try { rec && rec.stop(); } catch (err) { log('stop threw: ' + err.message, 'err'); }
+    startBtn.disabled = false; stopBtn.disabled = true;
+  };
+
+  $('#copy').onclick = async () => {
+    const text = Object.entries(env).map(([k, v]) => `${k}: ${v}`).join('\n') + '\n---\n' + lines.join('\n');
+    try { await navigator.clipboard.writeText(text); log('已複製紀錄', 'ok'); }
+    catch {
+      const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta);
+      ta.select(); document.execCommand('copy'); ta.remove(); log('已複製紀錄', 'ok');
+    }
+  };
+
+  // raw microphone level, independent of speech recognition
+  let micStream = null, raf = 0;
+  $('#micBtn').onclick = async () => {
+    if (micStream) {
+      micStream.getTracks().forEach((t) => t.stop()); micStream = null; cancelAnimationFrame(raf);
+      $('#meter div').style.width = '0'; $('#micBtn').textContent = '只測麥克風音量'; log('mic test stopped');
+      return;
+    }
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      log('getUserMedia ok: ' + micStream.getAudioTracks().map((t) => `${t.label} (${t.readyState}${t.muted ? ', muted' : ''})`).join(', '), 'ok');
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const an = ctx.createAnalyser(); an.fftSize = 512;
+      ctx.createMediaStreamSource(micStream).connect(an);
+      const buf = new Uint8Array(an.fftSize);
+      let peak = 0;
+      const loop = () => {
+        an.getByteTimeDomainData(buf);
+        let m = 0; for (const v of buf) m = Math.max(m, Math.abs(v - 128));
+        peak = Math.max(peak, m);
+        $('#meter div').style.width = Math.min(100, m / 1.28) + '%';
+        raf = requestAnimationFrame(loop);
+      };
+      loop();
+      setTimeout(() => log(`mic peak level in 3s: ${peak}/128`, peak > 4 ? 'ok' : 'err'), 3000);
+      $('#micBtn').textContent = '停止麥克風測試';
+    } catch (err) {
+      log('getUserMedia failed: ' + err.name + ' ' + err.message, 'err');
+    }
+  };
+
+  log('page loaded');
+})();
+</script>
+</body>
+</html>
