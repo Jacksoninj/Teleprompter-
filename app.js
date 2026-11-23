@@ -102,6 +102,8 @@
   // interim = not-yet-final text; skip = tokens of the current session to ignore after a manual jump
   let heard = '', session = '', interim = '', skip = 0;
   let endTimes = [];
+  let sessionStart = 0, resultsAtStart = 0;
+  let diag = { start: false, audio: false, sound: false, speech: false, results: 0, ends: 0, err: '', since: 0 };
   let lastGlobal = 0;
   let elapsed = 0, lastHudPaint = 0, lastAutoSync = 0;
   let wakeLock = null;
@@ -138,9 +140,10 @@
 
     const lines = text.replace(/\r\n?/g, '\n').split('\n');
     for (const raw of lines) {
-      const line = raw.trim().replace(/\*\*|__|`/g, '');
+      const trimmed = raw.trim();
+      const line = trimmed.replace(/\*\*|__|`/g, '');
       if (!line) { para = null; continue; }
-      const h = line.match(/^#{1,6}\s*(.*)$/);
+      const h = line.match(/^#{1,6}\s*(.*)$/) || trimmed.match(/^\*\*([^*]+)\*\*$/);
       if (h) {
         const el = document.createElement('div');
         el.className = 'sec';
@@ -352,7 +355,16 @@
     paintTranscript();
   }
 
+  const langLabel = () => document.querySelector(`#lang option[value="${settings.lang}"]`)?.textContent || settings.lang;
   function paintTranscript() {
+    if (listening && diag.results === 0) {
+      // nothing recognised yet: show what the browser has reported so far
+      const ok = (b) => (b ? '✓' : '–');
+      transcriptEl.textContent =
+        `${langLabel()}｜啟動 ${ok(diag.start)} 麥克風 ${ok(diag.audio)} 聲音 ${ok(diag.sound)} 說話 ${ok(diag.speech)} 結果 0` +
+        (diag.ends ? `｜重啟 ${diag.ends}` : '') + (diag.err ? `｜錯誤 ${diag.err}` : '');
+      return;
+    }
     if (!settings.transcript) { transcriptEl.textContent = ''; return; }
     const h = (heard + ' ' + session).trim().slice(-60);
     transcriptEl.innerHTML = '';
@@ -370,11 +382,20 @@
     if (listening) return;
     if (!recog) {
       recog = new SR();
-      recog.continuous = true;
+      // iOS Safari's continuous mode can sit "listening" without ever returning results;
+      // one utterance per session plus automatic restart is far more reliable there.
+      recog.continuous = !IS_IOS;
       recog.interimResults = true;
       recog.maxAlternatives = 1;
-      recog.onresult = onResult;
+      recog.onresult = (e) => { diag.results++; onResult(e); };
+      const mark = (k) => () => { diag[k] = true; paintTranscript(); };
+      recog.onstart = mark('start');
+      recog.onaudiostart = mark('audio');
+      recog.onsoundstart = mark('sound');
+      recog.onspeechstart = mark('speech');
       recog.onerror = (e) => {
+        diag.err = e.error;
+        paintTranscript();
         if (e.error === 'no-speech' || e.error === 'aborted') return;
         if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
           stopListening();
@@ -394,15 +415,18 @@
         foldSession();
         // Browsers end continuous recognition after silence or ~1 min. Restart while active,
         // but give up if it keeps dying immediately (e.g. iOS refusing restarts without a tap).
+        diag.ends++;
+        paintTranscript();
         if (listening) {
           const t = now();
-          endTimes = endTimes.filter((x) => t - x < 10000);
-          endTimes.push(t);
-          if (endTimes.length > 6) {
+          // only sessions that die almost immediately with nothing recognised count as failures
+          if (t - sessionStart < 1500 && diag.results === resultsAtStart) endTimes.push(t);
+          endTimes = endTimes.filter((x) => t - x < 15000);
+          if (endTimes.length > 5) {
             listening = false;
             toast('語音辨識一直中斷，請點 ▶ 重新開始。', 5000);
           } else {
-            setTimeout(() => { if (listening) { try { recog.start(); } catch { /* already started */ } } }, 150);
+            setTimeout(() => { if (listening) startSession(); }, 150);
           }
         }
         paintHud(true);
@@ -411,8 +435,14 @@
     recog.lang = settings.lang;
     listening = true;
     endTimes = [];
-    try { recog.start(); } catch { /* already running */ }
+    diag = { start: false, audio: false, sound: false, speech: false, results: 0, ends: 0, err: '', since: now() };
+    startSession();
     paintHud(true);
+  }
+  function startSession() {
+    sessionStart = now();
+    resultsAtStart = diag.results;
+    try { recog.start(); } catch { /* already running */ }
   }
 
   function stopListening() {
@@ -462,6 +492,7 @@
     if (!force && t - lastHudPaint < 250) return;
     lastHudPaint = t;
     hud.timer.textContent = fmtTime(elapsed);
+    if (listening && diag.results === 0) paintTranscript();
     hud.progress.textContent = tokens.length ? Math.round((pos / tokens.length) * 100) + '%' : '0%';
     let sec = '';
     for (const mk of marks) { if (mk.title == null) continue; if (mk.at <= pos) sec = mk.title; else break; }
@@ -470,7 +501,7 @@
     hud.dot.className = 'dot' + (listening ? ' on' : playing ? ' play' : '');
     hud.status.textContent =
       mode === 'manual' ? '手動模式' :
-      listening ? '聆聽中' :
+      listening ? `聆聽中・${langLabel()}` :
       playing ? `捲動中 ${settings.speed}px/秒` :
       mode === 'voice' ? '已暫停（空白鍵開始聆聽）' : '已暫停（空白鍵開始捲動）';
     hud.toggle.textContent = isRunning() ? '❚❚' : '▶';
@@ -713,6 +744,55 @@
     return out.join('\n').trim();
   }
 
+  // PDF: pdf.js is loaded from a CDN only when a PDF is imported (it is ~1.8 MB).
+  const PDFJS = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/legacy/build/';
+  async function pdfText(buf) {
+    const lib = await import(PDFJS + 'pdf.min.mjs');
+    lib.GlobalWorkerOptions.workerSrc = PDFJS + 'pdf.worker.min.mjs';
+    const doc = await lib.getDocument({ data: new Uint8Array(buf) }).promise;
+    const lines = []; // { text, y, h, page }
+    for (let n = 1; n <= doc.numPages; n++) {
+      const page = await doc.getPage(n);
+      const tc = await page.getTextContent();
+      let cur = null;
+      const flush = () => { if (cur && cur.text.trim()) lines.push(cur); cur = null; };
+      for (const it of tc.items) {
+        if (typeof it.str !== 'string') continue;
+        const y = it.transform[5], h = Math.abs(it.transform[3]) || it.height || 10;
+        if (cur && Math.abs(y - cur.y) > h * 0.6) flush();
+        if (!cur) cur = { text: '', y, h, page: n };
+        cur.text += it.str;
+        cur.h = Math.max(cur.h, h);
+        if (it.hasEOL) flush();
+      }
+      flush();
+    }
+    return pdfLinesToScript(lines);
+  }
+
+  // Rebuild paragraphs from PDF lines: join wrapped lines, keep headings on their own.
+  function pdfLinesToScript(lines) {
+    const isHeading = (t) => /^#{1,6}\s/.test(t) || /^\*\*[^*]+\*\*$/.test(t) || (/^(slide|投影片|第\s*\d+\s*張)\s*\d*/i.test(t) && t.length < 70 && !/[.。!?！？]$/.test(t));
+    const endsSentence = (t) => /[.!?。！？:：)\]」』"]$/.test(t);
+    const blocks = [];
+    let para = null, prev = null;
+    for (const ln of lines) {
+      const t = ln.text.normalize('NFKC').replace(/\s+/g, ' ').trim();
+      if (!t) continue;
+      if (isHeading(t)) { blocks.push(t); para = null; prev = null; continue; }
+      const gap = prev && prev.page === ln.page ? Math.abs(prev.y - ln.y) : null;
+      const newPara = !para ||
+        (gap != null ? gap > Math.max(prev.h, ln.h) * 1.8 : endsSentence(para.text));
+      if (newPara) { para = { text: t }; blocks.push(para); }
+      else {
+        const a = para.text, cjkJoin = CJK_RE.test(a.slice(-1)) && CJK_RE.test(t[0]);
+        para.text = a.endsWith('-') && /^[a-z]/.test(t) ? a + t : a + (cjkJoin ? '' : ' ') + t;
+      }
+      prev = ln;
+    }
+    return blocks.map((b) => (typeof b === 'string' ? b : b.text)).join('\n\n');
+  }
+
   async function importFile(file) {
     if (!file) return;
     const ext = (file.name.split('.').pop() || '').toLowerCase();
@@ -723,7 +803,10 @@
         text = docxText(xml(await zip.text('word/document.xml')));
       } else if (ext === 'pptx') {
         text = await pptxNotes(await unzip(await file.arrayBuffer()));
-      } else if (['doc', 'ppt', 'pdf', 'pages', 'key'].includes(ext)) {
+      } else if (ext === 'pdf') {
+        toast('正在讀取 PDF…', 8000);
+        text = await pdfText(await file.arrayBuffer());
+      } else if (['doc', 'ppt', 'pages', 'key'].includes(ext)) {
         throw new Error(`不支援 .${ext}，請另存成 .docx、.pptx 或 .txt`);
       } else {
         text = await readTextFile(file);
@@ -799,8 +882,24 @@
     pokeHud();
     requestWake();
     if (!rafId) { lastT = 0; rafId = requestAnimationFrame(tick); }
-    if (settings.mode === 'voice' && tokens.length) startListening();
+    if (settings.mode === 'voice' && tokens.length) { checkLanguage(); startListening(); }
     else if (settings.mode === 'auto') toast(IS_TOUCH ? '點 ▶ 開始捲動，用「慢／快」調整速度' : '按空白鍵開始捲動，↑ ↓ 調整速度');
+  }
+
+  function checkLanguage() {
+    const share = (re) => tokens.filter((t) => re.test(t.norm)).length / (tokens.length || 1);
+    const cjk = share(CJK_RE), latin = share(/^[a-z0-9'.-]+$/);
+    const lang = settings.lang.slice(0, 2);
+    let to = null;
+    if (latin > 0.8 && ['zh', 'ja', 'ko'].includes(lang)) to = 'en-US';
+    else if (cjk > 0.6 && !['zh', 'ja'].includes(lang)) {
+      const g = guessLang();
+      to = /^(zh|ja)/.test(g) ? g : 'zh-TW';
+    }
+    if (!to) return;
+    settings.lang = to;
+    saveSettings(); syncInputs(); refreshSupport();
+    toast(`講稿的語言和辨識語言不同，已改用「${langLabel()}」辨識。可在設定裡更改。`, 5000);
   }
 
   function exitPrompter() {

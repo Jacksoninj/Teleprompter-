@@ -28,14 +28,14 @@
     <div class="card script-card">
       <div class="toolbar">
         <label class="btn" for="file">匯入檔案</label>
-        <input type="file" id="file" accept=".txt,.md,.markdown,.docx,.pptx,text/plain" hidden>
+        <input type="file" id="file" accept=".txt,.md,.markdown,.docx,.pptx,.pdf,text/plain,application/pdf" hidden>
         <button id="sample" class="btn ghost" type="button">載入範例</button>
         <button id="clear" class="btn ghost" type="button">清空</button>
         <span id="stats" class="muted"></span>
       </div>
-      <textarea id="script" spellcheck="false" placeholder="在這裡貼上講稿，或把 .txt / .md / .docx / .pptx 檔案拖進來。"></textarea>
+      <textarea id="script" spellcheck="false" placeholder="在這裡貼上講稿，或把 .txt / .md / .docx / .pdf / .pptx 檔案拖進來。"></textarea>
       <p class="hint">
-        支援 <b>.txt</b>、<b>.md</b>、<b>.docx</b>，以及 <b>.pptx</b>（讀取每張投影片的演講者備忘稿）。<br>
+        支援 <b>.txt</b>、<b>.md</b>、<b>.docx</b>、<b>.pdf</b>，以及 <b>.pptx</b>（讀取每張投影片的演講者備忘稿）。<br>
         以 <code>#</code> 開頭的行是段落標題；<code>[方括號]</code> 裡是提示，例如 <code>[停頓]</code>、<code>[換投影片]</code>。這兩種都不需要唸出來，也不會影響追蹤。
       </p>
     </div>
