@@ -386,6 +386,7 @@
 
   // Keep recognition alive for as long as the user wants it: restart after every end, back off
   // when sessions keep failing, and run a watchdog in case the browser silently stops.
+  let sessionSpeech = false;
   let fails = 0, sessionActive = false, lastStartCall = 0, lastEventAt = 0, watchdog = 0, restartTimer = 0, warnedCapture = false;
   const FATAL = ['not-allowed', 'service-not-allowed', 'language-not-supported'];
 
@@ -395,15 +396,17 @@
     if (listening) return;
     if (!recog) {
       recog = new SR();
-      // iOS Safari: one utterance per session plus automatic restart
-      recog.continuous = !IS_IOS;
+      // Continuous mode avoids the ~1.3 s gap between utterances. On iOS it works once the mic
+      // is healthy, but if a continuous session hears speech and never returns a result we fall
+      // back to one utterance per session (remembered on this device).
+      recog.continuous = !IS_IOS || LS.get('iosContinuous', true);
       recog.interimResults = true;
       recog.maxAlternatives = 1;
       const seen = (k, label) => () => { diag[k] = true; lastEventAt = now(); logEv(label); paintTranscript(); };
-      recog.onstart = () => { sessionActive = true; sessionStart = now(); resultsAtStart = diag.results; seen('start', 'start')(); };
+      recog.onstart = () => { sessionActive = true; sessionSpeech = false; sessionStart = now(); resultsAtStart = diag.results; seen('start', 'start')(); };
       recog.onaudiostart = seen('audio', 'audiostart');
       recog.onsoundstart = seen('sound', 'soundstart');
-      recog.onspeechstart = seen('speech', 'speechstart');
+      recog.onspeechstart = () => { sessionSpeech = true; seen('speech', 'speechstart')(); };
       recog.onresult = (e) => {
         diag.results++;
         fails = 0;
@@ -438,6 +441,11 @@
         const failed = diag.results === resultsAtStart && now() - sessionStart < 4000;
         fails = failed ? fails + 1 : 0;
         logEv(`end${failed ? ` (failed ×${fails})` : ''}`);
+        if (IS_IOS && recog.continuous && sessionSpeech && diag.results === resultsAtStart && now() - sessionStart > 6000) {
+          recog.continuous = false;
+          LS.set('iosContinuous', false);
+          logEv('iOS: continuous gave no results → single-utterance mode');
+        }
         paintTranscript();
         if (listening) scheduleRestart();
         paintHud(true);
